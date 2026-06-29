@@ -140,14 +140,6 @@ function filterValidCandles(cs: CandleData[]): CandleData[] {
   });
 }
 
-// Repair and validate raw API candles before storing.
-// Fresh/new tokens may return partial OHLC where open/high/low are 0 but close is valid.
-// Rules:
-//  - Reject candles with invalid timestamp or close <= 0.
-//  - Repair open/high/low by falling back to close — never invent movement.
-//  - Enforce high >= open, high >= close; low <= open, low <= close.
-//  - Reject if high < low after repair (truly impossible candle).
-//  - Zero or negative volume is clamped to 0 (no volume bar will be rendered).
 function sanitizeRawCandles(cs: CandleData[]): CandleData[] {
   const result: CandleData[] = [];
   for (const c of cs) {
@@ -156,14 +148,12 @@ function sanitizeRawCandles(cs: CandleData[]): CandleData[] {
     if (!isFinite(ts) || ts <= 0) continue;
     const close = isFinite(c.close) && c.close > 0 ? c.close : 0;
     if (close <= 0) continue;
-    // Repair missing OHLC fields — fall back to close, never invent movement
     const open  = isFinite(c.open)  && c.open  > 0 ? c.open  : close;
     const high  = isFinite(c.high)  && c.high  > 0 ? c.high  : close;
     const low   = isFinite(c.low)   && c.low   > 0 ? c.low   : close;
-    // Enforce valid OHLC relationship
     const safeHigh = Math.max(high, open, close);
     const safeLow  = Math.min(low,  open, close);
-    if (safeHigh < safeLow) continue; // should never happen after above, but guard anyway
+    if (safeHigh < safeLow) continue;
     result.push({
       timestamp: ts,
       open,
@@ -176,7 +166,6 @@ function sanitizeRawCandles(cs: CandleData[]): CandleData[] {
   return result;
 }
 
-// Keep the best real candle per bucket (highest volume wins; real candles with volume take priority over zero-volume visual guides).
 function dedupByBucket(cs: CandleData[], bucketMs: number): CandleData[] {
   if (cs.length === 0) return cs;
   const map = new Map<number, CandleData>();
@@ -190,8 +179,6 @@ function dedupByBucket(cs: CandleData[], bucketMs: number): CandleData[] {
   return Array.from(map.values()).sort((a, b) => a.timestamp - b.timestamp);
 }
 
-
-
 const TIMEFRAME_ORDER: TimeFrame[] = ['1m', '5m', '15m', '1H', '4H', '1D', '1W', '1M'];
 
 function timeframeRank(tf: TimeFrame): number {
@@ -201,8 +188,6 @@ function timeframeRank(tf: TimeFrame): number {
 
 function getLowerOrEqualTimeframes(tf: TimeFrame): TimeFrame[] {
   const rank = timeframeRank(tf);
-  // Start with the selected timeframe, then try finer real sources that can be
-  // aggregated upward without inventing smaller candles.
   const frames = [tf, ...TIMEFRAME_ORDER.slice(0, rank).reverse()];
   return Array.from(new Set(frames));
 }
@@ -253,14 +238,12 @@ function scoreCandleSet(cs: CandleData[], targetTf: TimeFrame): number {
   return countScore + spanScore + volumeScore - gapPenalty - flatPenalty;
 }
 
-// Infer the median candle-to-candle gap in ms from a sorted candle array.
 function inferBucketMs(cs: CandleData[]): number {
   if (cs.length < 2) return BUCKET_MS['1D'];
   const gaps = cs.slice(1).map((c, i) => c.timestamp - cs[i].timestamp).sort((a, b) => a - b);
   return gaps[Math.floor(gaps.length / 2)];
 }
 
-// Map a bucket duration in ms to the closest base TimeFrame.
 function msToBestTimeFrame(ms: number): TimeFrame {
   const candidates: [number, TimeFrame][] = [
     [BUCKET_MS['1m'],  '1m'],
@@ -318,19 +301,15 @@ function fmtTime(ts: number, tf: ChartTimeFrame): string {
 }
 function fmtTimeByStep(ts: number, stepMs: number): string {
   const d = new Date(ts);
-  // Monthly or longer: show "Mon YYYY"
   if (stepMs >= 30 * 86_400_000) {
     return d.toLocaleDateString(undefined, { month: 'short', year: 'numeric' });
   }
-  // Weekly: show "Mon D"
   if (stepMs >= 7 * 86_400_000) {
     return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
   }
-  // Daily: show "Mon D"
   if (stepMs >= 86_400_000) {
     return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
   }
-  // Sub-daily: show date at midnight, otherwise time
   if (d.getHours() === 0 && d.getMinutes() === 0) {
     return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
   }
@@ -345,8 +324,6 @@ function fmtValue(v: number, mode: ValueMode): string {
   return mode === 'mcap' ? fmtMcap(v) : `$${fmtPrice(v)}`;
 }
 
-// Module-level cache: resolved pair address per token mint.
-// Avoids a redundant DexScreener fetch every time the component remounts for the same token.
 const resolvedPairCache = new Map<string, string>();
 
 // ─── Main component ───────────────────────────────────────────────────────────
@@ -373,8 +350,6 @@ export function TradingViewChart({
   } : undefined);
 
   const [timeframe, setTimeframe] = useState<ChartTimeFrame>('1H');
-  // Tracks which resolution was actually used when timeframe === 'ALL'.
-  // Starts at 1D; auto-degrades to 1H or 5m for newer/sparser tokens.
   const [allEffectiveTf, setAllEffectiveTf] = useState<TimeFrame>('1D');
 
   const allEffectiveBucketMs = timeframe === 'ALL'
@@ -382,8 +357,6 @@ export function TradingViewChart({
     : (BUCKET_MS[timeframe] ?? 3_600_000);
 
   // ── Real-time data layer ─────────────────────────────────────────────────────
-  // useRealtimeChart owns: historical load, Helius WS, Supabase realtime,
-  // DexScreener poll fallback. Every confirmed trade updates the real candles array.
   const {
     candles: rtCandles,
     livePrice: rtLivePrice,
@@ -399,7 +372,6 @@ export function TradingViewChart({
   const loading  = rtLoading;
   const hasData  = candles.length > 0;
 
-  // For ALL timeframe: infer effective resolution from median candle spacing.
   useEffect(() => {
     if (timeframe !== 'ALL' || candles.length < 2) return;
     const medianGap = inferBucketMs(candles);
@@ -414,7 +386,6 @@ export function TradingViewChart({
     if (onValueModeChange) onValueModeChange(v);
     else setInternalValueMode(v);
   };
-  // livePrice: hook-provided price takes priority; fallback to local quote-poll updates.
   const [localLivePrice, setLivePrice] = useState<number | null>(null);
   const livePrice: number | null = rtLivePrice ?? localLivePrice;
   const [live24hChange, setLive24hChange] = useState<number | null>(null);
@@ -434,22 +405,15 @@ export function TradingViewChart({
   const chartPulseAnim  = useRef(new Animated.Value(0)).current;
 
   const plotWRef            = useRef(0);
-  // Always mirrors the engine's current panOffsetMs so PanResponder closures
-  // don't read stale React state from the initial render.
   const currentPanOffsetMsRef = useRef(0);
-  // ms-based pan offset captured at gesture start (delta-from-start math).
   const panStartOffsetMsRef = useRef(0);
-  // 'idle' → 'crosshair' or 'pan' — locked until touch release.
   const gestureModeRef      = useRef<'idle' | 'crosshair' | 'pan'>('idle');
   const touchStartXRef      = useRef(0);
   const touchStartYRef      = useRef(0);
   const touchStartTimeRef   = useRef(0);
 
-  // All ranked DexScreener pair addresses for the current token.
-  // Stored so we can fall back to the next pair if the primary WS fails repeatedly.
   const rankedPairsRef = useRef<string[]>([]);
 
-  // Stable price scale — recomputed only when visible candle set changes, not on clock tick.
   const priceScaleRef    = useRef({ maxP: 0, minP: 0, priceRange: 1, maxVol: 1 });
   const priceScaleKeyRef = useRef('');
 
@@ -469,22 +433,13 @@ export function TradingViewChart({
   const hasAutoScrolledRef = useRef(false);
   const timeframeRef   = useRef<ChartTimeFrame>('1H');
   const prevExternalPriceRef = useRef<number>(0);
-  // True only when the user explicitly drags the chart; reset on token/timeframe change.
-  // Prevents "Return to Live" from appearing after auto-scroll adjustments.
   const userPannedRef = useRef(false);
 
-  // Centralized price pipeline: track timestamp of latest accepted price to prevent
-  // stale API responses from overwriting fresher live prices.
   const latestPriceTsRef = useRef<number>(0);
 
-  // Local visibility mirror — kept in sync with engine, also used as WS reconnect guard.
   const chartVisibleRef = useRef(true);
-  // Set to true while applying a liveTokenStore-sourced update to prevent push-back.
   const fromStoreRef = useRef(false);
-  // Set to true once the user manually picks a chart mode; suppresses auto-detection.
   const userSelectedModeRef = useRef(false);
-  // Stable supply: computed once from snapshot, never drifts with livePrice.
-  // Reset when tokenMint changes so a new token gets a fresh calculation.
   const stableSupplyRef = useRef<number | null>(null);
 
   const leftTimeRef   = useRef<number>(Date.now() - 3_600_000 * 60);
@@ -492,8 +447,6 @@ export function TradingViewChart({
   const bucketMsRef   = useRef<number>(3_600_000);
 
   // ── Animation engine ────────────────────────────────────────────────────────
-  // maxPanBackMs: how far back in time the user can scroll, anchored to the
-  // oldest loaded real candle so we never pan into a blank empty void.
   const panBucketMsForLimit = timeframe === 'ALL'
     ? (BUCKET_MS[allEffectiveTf] ?? 3_600_000)
     : (BUCKET_MS[timeframe] ?? 3_600_000);
@@ -502,7 +455,6 @@ export function TradingViewChart({
     ? Math.max(0, Date.now() - candles[0].timestamp + panVisibleMsForLimit)
     : 0;
   const animEngine = useChartAnimationEngine(maxPanBackMs);
-  // Interpolated price from animation engine — available at all render sites below.
   const interpP = animEngine.state.interpolatedPrice;
 
   useEffect(() => { livePriceRef.current = livePrice; }, [livePrice]);
@@ -511,20 +463,14 @@ export function TradingViewChart({
   useEffect(() => { timeframeRef.current = timeframe; }, [timeframe]);
   useEffect(() => { activeLiveCandleRef.current = activeLiveCandle; }, [activeLiveCandle]);
 
-  // Feed every real trade price into the animation engine so it interpolates
-  // from the previous rendered price to the true new price over ~150 ms.
   useEffect(() => {
     if (rtLivePrice && rtLivePrice > 0) {
       animEngine.actions.setTargetPrice(rtLivePrice);
     }
   }, [rtLivePrice, rtLivePriceTs]);
 
-  // Keep currentPanOffsetMsRef in sync so PanResponder (created once) reads fresh value.
   currentPanOffsetMsRef.current = animEngine.state.panOffsetMs;
 
-  // Resolve best pair address from DexScreener when token mint changes.
-  // Prefers pairs with usable live price data (non-zero priceUsd + liquidity/volume).
-  // Caches the resolved address per mint so the fetch only happens once per token.
   useEffect(() => {
     if (!tokenMint) return;
     if (pairAddress) {
@@ -549,8 +495,6 @@ export function TradingViewChart({
         const data = await res.json();
         const pairs: any[] = (data.pairs || []).filter((p: any) => p.chainId === 'solana');
         if (pairs.length === 0 || cancelled) return;
-        // Prefer pairs with usable live price data (non-zero priceUsd and some activity).
-        // This avoids getting stuck on a dead AMM with no recent trades.
         const usable = pairs.filter((p: any) =>
           parseFloat(p.priceUsd || '0') > 0 &&
           ((p.liquidity?.usd || 0) > 0 || (p.volume?.h24 || 0) > 0)
@@ -560,7 +504,6 @@ export function TradingViewChart({
         const allAddrs = ranked.map((p: any) => p.pairAddress).filter(Boolean) as string[];
         const addr = allAddrs[0];
         if (!cancelled && addr) {
-          // Store all ranked pairs for WS candidate rotation; do not cache until OHLCV validates.
           rankedPairsRef.current = allAddrs;
           setResolvedPairAddr(addr);
           pairAddrRef.current = addr;
@@ -570,7 +513,7 @@ export function TradingViewChart({
     return () => { cancelled = true; };
   }, [tokenMint, pairAddress]);
 
-  // Header WS dot pulse — always running
+  // Header WS dot pulse
   useEffect(() => {
     const loop = Animated.loop(Animated.sequence([
       Animated.timing(headerPulseAnim, { toValue: 2.2, duration: 400, useNativeDriver: true }),
@@ -580,9 +523,7 @@ export function TradingViewChart({
     return () => loop.stop();
   }, []);
 
-  // Chart endpoint pulse — only when a confirmed real-trade live candle is active and fresh.
-  // quotePoll candles (DexScreener WS, Jupiter REST, liveTokenStore) update the chart line
-  // but are NOT confirmed on-chain events, so the pulse ring must not fire for them.
+  // Chart endpoint pulse
   useEffect(() => {
     if (!activeLiveCandle || activeLiveCandle.sourceType !== 'realTrade') {
       chartPulseAnim.setValue(0);
@@ -601,8 +542,7 @@ export function TradingViewChart({
     return () => loop.stop();
   }, [activeLiveCandle]);
 
-  // Viewport visibility — wire IntersectionObserver to the animation engine
-  // and keep the local chartVisibleRef in sync for the WS reconnect guard.
+  // Viewport visibility
   useEffect(() => {
     if (Platform.OS !== 'web' || typeof IntersectionObserver === 'undefined') return;
     if (!hasData) {
@@ -625,17 +565,6 @@ export function TradingViewChart({
     };
   }, [hasData, animEngine.actions]);
 
-  // ── Single price pipeline ────────────────────────────────────────────────────
-  // All price sources funnel through applyLivePrice. Each call carries a timestamp
-  // so that a late-arriving REST response never overwrites a fresher live price.
-  // isRealTrade = true  → a timestamped on-chain trade; may create/update activeLiveCandle.
-  // isRealTrade = false → REST/WS quote, DexScreener, Jupiter; updates display only.
-  // The active live candle (current bucket only) is updated separately from history.
-  // ── Quote-only price applier ─────────────────────────────────────────────────
-  // Real trades are handled by useRealtimeChart. This function handles quote-only
-  // sources: DexScreener WS, Jupiter REST poll, liveTokenStore, external snapshot.
-  // It updates the display price and pushes to liveTokenStore but does NOT
-  // create or modify the activeLiveCandle (the hook owns that).
   const applyLivePrice = useCallback((
     price: number,
     sourceTs?: number,
@@ -682,9 +611,7 @@ export function TradingViewChart({
       ws.onclose = () => {
         try { setWsConnected(false); } catch {}
         wsRef.current = null;
-        // Stop retrying after 5 attempts — pair is likely unavailable or bad.
         if (wsRetryCountRef.current >= 5) {
-          // Try the next ranked pair if available (max 3 pairs total to avoid runaway loops).
           const currentIdx = rankedPairsRef.current.findIndex(a => a === pairAddrRef.current);
           const nextAddr = currentIdx >= 0 && currentIdx < 2
             ? rankedPairsRef.current[currentIdx + 1]
@@ -701,10 +628,8 @@ export function TradingViewChart({
           }
           return;
         }
-        // Don't reconnect when the tab or chart is not visible.
         if (typeof document !== 'undefined' && document.hidden) return;
         if (!chartVisibleRef.current) return;
-        // Exponential backoff: 5s → 10s → 20s → 40s → 60s (cap).
         const delay = Math.min(5000 * Math.pow(2, wsRetryCountRef.current), 60_000);
         wsRetryCountRef.current++;
         if (wsReconnectTimerRef.current) clearTimeout(wsReconnectTimerRef.current);
@@ -716,8 +641,7 @@ export function TradingViewChart({
     } catch { setWsConnected(false); }
   }, [applyLivePrice]);
 
-  // On token mint change: clear display state so new token starts fresh.
-  // candles, activeLiveCandle, loading, hasData are reset by useRealtimeChart.
+  // On token mint change
   useEffect(() => {
     if (prevMintRef.current === tokenMint) return;
     prevMintRef.current = tokenMint;
@@ -734,32 +658,26 @@ export function TradingViewChart({
     rankedPairsRef.current = [];
   }, [tokenMint]);
 
-  // Auto-select chart mode based on token trading density.
-  // Uses gap/volume analysis to detect sparse tokens — these look bad with area fill.
-  // Skipped once the user manually picks a mode.
+  // Auto-select chart mode
   useEffect(() => {
     if (!hasData || candles.length === 0 || userSelectedModeRef.current) return;
     const sevenDaysAgo = Date.now() - 7 * 86_400_000;
     const recent = candles.filter(c => c.timestamp >= sevenDaysAgo);
     const count = recent.length;
     if (count < 5) { setMode('candlestick'); return; }
-    // Volume coverage: candles with actual trading activity
     const withVolume = recent.filter(c => c.volume > 0).length;
     const volumeRatio = withVolume / count;
-    // Gap analysis: find max consecutive gap
     let maxGapMs = 0;
     for (let i = 1; i < recent.length; i++) {
       const g = recent[i].timestamp - recent[i - 1].timestamp;
       if (g > maxGapMs) maxGapMs = g;
     }
     const oneDayMs = 86_400_000;
-    // Sparse: few candles, poor volume coverage, or a gap > 1 day in recent history
     const isSparse = count < 20 || volumeRatio < 0.3 || (count < 50 && maxGapMs > oneDayMs);
     setMode(isSparse ? 'candlestick' : 'area');
   }, [hasData, tokenMint]);
 
-  // Reset viewport + crosshair when token or timeframe changes.
-  // loadData is removed — useRealtimeChart handles data fetching.
+  // Reset viewport on token/timeframe change
   useEffect(() => {
     setCrosshair(null);
     animEngine.actions.returnToLive();
@@ -771,7 +689,7 @@ export function TradingViewChart({
 
   useEffect(() => { setCrosshair(null); }, [mode]);
 
-  // Connect WebSocket once pair address is resolved
+  // Connect WebSocket
   useEffect(() => {
     if (!resolvedPairAddr) return;
     connectWebSocket(resolvedPairAddr);
@@ -789,18 +707,14 @@ export function TradingViewChart({
     };
   }, [resolvedPairAddr]);
 
-  // REST price backup — 10s interval. Only updates if newer than last accepted price.
+  // REST price backup
   useEffect(() => {
     if (!tokenMint) return;
     if (pollTimerRef.current) clearInterval(pollTimerRef.current);
 
     const fetchPrice = async () => {
-      // Skip REST polling when a real-time source (WS, liveTokenStore, Helius)
-      // already provided a fresh price in the last 7 seconds — avoids stale
-      // REST responses overwriting live prices and reduces mobile CPU usage.
       if (Date.now() - latestPriceTsRef.current < 7000) return;
       const startTs = Date.now();
-      // Primary: Jupiter Price API
       try {
         const jupRes = await fetch(
           `https://api.jup.ag/price/v2?ids=${tokenMint}`,
@@ -809,11 +723,9 @@ export function TradingViewChart({
         if (jupRes.ok) {
           const jupData = await jupRes.json();
           const jupPrice = Number(jupData?.data?.[tokenMint!]?.price ?? 0);
-          // Jupiter REST is a quote-only price — not a real trade event.
           if (jupPrice > 0) { applyLivePrice(jupPrice, startTs, false); return; }
         }
       } catch {}
-      // Fallback: DexScreener REST
       try {
         const pair = pairAddrRef.current;
         const url = pair
@@ -825,13 +737,11 @@ export function TradingViewChart({
         const pairData = data.pair ?? data.pairs?.[0];
         if (!pairData) return;
         const p = parseFloat(pairData.priceUsd || '0');
-        // DexScreener REST is a quote-only price — not a real trade event.
         if (p > 0) applyLivePrice(p, startTs, false);
       } catch {}
     };
 
     const firstPoll = setTimeout(fetchPrice, 1500);
-    // Poll every 10s — less aggressive than before, reduces mobile CPU usage
     pollTimerRef.current = setInterval(fetchPrice, 10_000);
     return () => {
       clearTimeout(firstPoll);
@@ -839,18 +749,16 @@ export function TradingViewChart({
     };
   }, [tokenMint, applyLivePrice]);
 
-  // External price from parent tokenInfo — lower priority than WS, higher than nothing
+  // External price from parent
   useEffect(() => {
     const externalPrice = resolvedInfo?.price;
     if (!externalPrice || externalPrice <= 0) return;
     if (externalPrice === prevExternalPriceRef.current) return;
     prevExternalPriceRef.current = externalPrice;
-    // External price from parent is a snapshot/API value — not a real trade event.
     applyLivePrice(externalPrice, Date.now() - 2000, false);
   }, [resolvedInfo?.price, applyLivePrice]);
 
-  // liveTokenStore subscription — pushed by other parts of the app.
-  // fromStoreRef prevents applyLivePrice from pushing right back into the store.
+  // liveTokenStore subscription
   useEffect(() => {
     if (!tokenMint) return;
     const unsub = liveTokenStore.watch(tokenMint, (state) => {
@@ -859,7 +767,6 @@ export function TradingViewChart({
         applyLivePrice(state.price, state.lastUpdatedAt, false);
         fromStoreRef.current = false;
       }
-      // Capture 24h change from store — refreshed every 30s by DexScreener polls.
       if (state.priceChange24h !== 0) {
         setLive24hChange(state.priceChange24h);
       }
@@ -867,29 +774,16 @@ export function TradingViewChart({
     return unsub;
   }, [tokenMint, applyLivePrice]);
 
-  // Supabase realtime for live trades is now handled by useRealtimeChart.
-  // That hook opens a direct channel per (mint, timeframe) accepting all
-  // is_live=true rows (not restricted to timeframe='1m') so charts on every
-  // timeframe get immediate updates when Helius writes a new candle.
-
-  // IMPORTANT: no automatic pan correction after data loads.
   useEffect(() => {
     hasAutoScrolledRef.current = true;
   }, [tokenMint, timeframe]);
 
   // ── chart geometry ────────────────────────────────────────────────────────
-  // MCAP scale: token supply frozen once per token so MCAP never drifts with quote prices.
-  // Priority: 1) real totalSupply from caller  2) derived snapshot  3) live-price derivation.
-  // All display surfaces (header, axis, live pill, crosshair) multiply by the same supply.
   {
     if (stableSupplyRef.current === null) {
       const ts = resolvedInfo?.totalSupply;
       const sp = resolvedInfo?.price;
       const sm = resolvedInfo?.marketCap;
-      // Prefer the snapshot marketCap/price ratio when both exist. Some token APIs
-      // return misleading totalSupply values for pump/sparse tokens, which can make
-      // chart MCAP explode into billions. The snapshot ratio keeps header, axis and
-      // price pill consistent with the token card.
       if (sp && sp > 0 && sm && sm > 0) {
         stableSupplyRef.current = sm / sp;
       } else if (livePrice && livePrice > 0 && sm && sm > 0) {
@@ -909,50 +803,26 @@ export function TradingViewChart({
   const plotHRef = useRef(plotH);
   plotHRef.current = plotH;
 
-  // ── Live time geometry ────────────────────────────────────────────────────
-  // ALL mode: use the resolution that was actually fetched (allEffectiveTf),
-  // not the hardcoded BUCKET_MS['ALL'] = 1D. Without this fix, 1H candles
-  // all collapse to the same x-position (12h offset each), creating vertical walls.
   const bucketMs       = timeframe === 'ALL'
     ? (BUCKET_MS[allEffectiveTf] ?? 3_600_000)
     : (BUCKET_MS[timeframe] ?? 3_600_000);
   const visibleBuckets = VISIBLE_BUCKETS[timeframe] ?? 48;
-  // panOffsetCandles derived from engine for all downstream consumers.
   const panOffsetCandles = bucketMs > 0 ? animEngine.state.panOffsetMs / bucketMs : 0;
   let rightTime          = animEngine.state.visualRightTime - animEngine.state.panOffsetMs;
   const visibleMs        = visibleBuckets * bucketMs;
   let leftTime           = rightTime - visibleMs;
   bucketMsRef.current    = bucketMs;
 
-  // Merge real historical candles + active live candle at render time.
-  // Real candles are immutable; only the active live candle updates on price change.
   const mergedCandles = useMemo(() => {
-    // `candles` state is always produced by sanitizeRawCandles inside loadData —
-    // applying filterValidCandles a second time would create two competing validation
-    // systems and could silently reject valid flat-doji candles (open=high=low=close).
-    // Single validation pass: use candles directly.
     const deduped = dedupByBucket(candles, bucketMs);
     if (!activeLiveCandle) return deduped;
     const liveB = Math.floor(activeLiveCandle.timestamp / bucketMs) * bucketMs;
-    // Remove any historical candle in the same bucket (live price owns that bucket)
     const withoutSameBucket = deduped.filter(
       c => Math.floor(c.timestamp / bucketMs) * bucketMs !== liveB
     );
     return [...withoutSameBucket, activeLiveCandle].sort((a, b) => a.timestamp - b.timestamp);
   }, [candles, activeLiveCandle, bucketMs]);
 
-  // ── Unified viewport + visible candles ─────────────────────────────────────
-  // IMPORTANT:
-  // The x-window is computed ONCE from the animation engine and the full real
-  // candle history. Line, area, candles, bars, volume and time labels all share
-  // this exact same xLeft/xVisibleMs. This prevents the old bugs where:
-  //   - the line folded back on itself,
-  //   - volume bars appeared detached or stuck on the left,
-  //   - scroll snapped back because xLeft was reclamped from only the currently
-  //     visible subset,
-  //   - the latest dot became a separate element.
-  //
-  // No fake candles, no fake volume and no data mutation are created here.
   let xLeft      = rightTime - visibleMs;
   let xVisibleMs = visibleMs;
 
@@ -964,23 +834,12 @@ export function TradingViewChart({
     const rightPadMs = Math.min(Math.max(bucketMs * 2.5, visibleMs * 0.08), visibleMs * 0.16);
 
     const minLeft = firstHistoryTs - leftPadMs;
-    // Live left edge is the newest viewport position. User pan can move from
-    // this live edge back to minLeft, even when the token is sparse or the
-    // candle span is shorter than the visible window. Using lastHistoryTs here
-    // made sparse charts feel locked and prevented scrolling to history.
     const liveLeft = Math.max(minLeft, rightTime - visibleMs);
     const maxLeft = liveLeft;
 
     if (panOffsetCandles === 0) {
-      // Live mode: follow the animation engine directly. Do not clamp to the
-      // latest candle, because that freezes the chart and prevents continuous
-      // Pump-style time movement. If no real candle is inside the live window,
-      // the renderer shows a flat last-price guide instead of moving xLeft back.
       xLeft = liveLeft;
     } else {
-      // User pan: fixed-width viewport translation only.
-      // Do not autosnap on release. Do not zoom/squeeze. Do not reclamp using a
-      // subset of visible candles.
       const desiredLeft = rightTime - visibleMs;
       xLeft = Math.max(minLeft, Math.min(desiredLeft, maxLeft));
     }
@@ -999,16 +858,6 @@ export function TradingViewChart({
     c.timestamp >= visibleWindowStart && c.timestamp <= visibleWindowEnd
   );
 
-  // If no real candle is inside the current live window, do not move xLeft back
-  // and do not inject old candles into the current viewport. A flat display-only
-  // last-price guide is rendered below so the chart is not empty, while the time
-  // axis can still move continuously.
-
-  // Apply MCAP scale for rendering.
-  // When a token has a valid live/snapshot price but no OHLCV candles on the selected
-  // timeframe, keep the chart usable by drawing a zero-volume visual price guide.
-  // This is display-only spacing: it is not saved to state, not treated as a trade,
-  // not counted as volume, and not used as historical activity.
   const renderGuidePrice = activeLiveCandle
     ? activeLiveCandle.close
     : mergedCandles.length > 0
@@ -1023,17 +872,9 @@ export function TradingViewChart({
 
   const hasRealRenderCandles = filledRaw.length > 0;
 
-  // Do NOT create a fake two-point guide line when no real candle is visible.
-  // The price guide/pill can still show the current value, but the plotted line,
-  // area, candles and volume must come only from real OHLCV candles.
   const renderRaw = hasRealRenderCandles ? filledRaw : [];
   const isVisualGuideOnly = false;
 
-  // Normalize candle unit before display.
-  // Some upstream APIs occasionally return OHLCV values in a wrong unit/mcap-like
-  // magnitude while the token header has the correct live price. We preserve the
-  // real candle SHAPE, but anchor the last candle to the live/snapshot price so
-  // PRICE mode cannot show values like $179B for a $0.0002 token.
   const quoteAnchorPrice = livePrice && livePrice > 0
     ? livePrice
     : currentPrice && currentPrice > 0
@@ -1075,19 +916,14 @@ export function TradingViewChart({
   const n = displayCandles.length;
 
   // ── Stable price scale ────────────────────────────────────────────────────
-  // Keyed on visible window boundaries and visible min/max so scale fits exactly
-  // what's on screen when panning. Live spike expands scale in-place.
   {
     const dcLen   = displayCandles.length;
     const dcFirst = displayCandles[0];
     const dcLast  = displayCandles[dcLen - 1];
-    // Restrict to visible window for scale computation — use xLeft (post-adjustment)
-    // so the Y scale matches exactly what is rendered, not the wider raw time window.
     const visibleOnly = displayCandles.filter(
       c => c.timestamp >= xLeft && c.timestamp <= xLeft + xVisibleMs
     );
     const scaleBase   = visibleOnly.length > 0 ? visibleOnly : displayCandles;
-    // Real candles (volume > 0) take priority for scale; zero-volume live/visual guide candles expands it
     const realVisible = scaleBase.filter(c => c.volume > 0);
     const scaleSource = realVisible.length > 0 ? realVisible : scaleBase;
     const visMinLow  = scaleSource.length > 0 ? Math.min(...scaleSource.map(c => c.low))  : 0;
@@ -1097,11 +933,6 @@ export function TradingViewChart({
       timeframe, valueMode, panOffsetCandles,
       dcLen,
       dcFirst?.timestamp ?? 0, dcLast?.timestamp ?? 0,
-      // Use bucket-level granularity, NOT 1-second. The animation engine advances
-      // xLeft every RAF tick (real-clock speed); using /1000 here caused the scale key
-      // to change every second and triggered a full Y-axis recalculation on every frame,
-      // producing the "sliding/backward" visual artifact. Bucket-level means the scale
-      // only recomputes when the viewport has actually moved by a full candle width.
       Math.round(xLeft / bucketMs), Math.round(rightTime / bucketMs),
       visMinLow.toPrecision(4), visMaxHigh.toPrecision(4),
     ].join('|');
@@ -1111,19 +942,12 @@ export function TradingViewChart({
       const safeMax  = isFinite(visMaxHigh) && visMaxHigh > 0 ? visMaxHigh : 1;
       const safeMin  = isFinite(visMinLow)  && visMinLow  >= 0 ? visMinLow : 0;
       const range    = (safeMax - safeMin) || safeMax * 0.02 || 0.001;
-      // Very sparse tokens (<5 visible candles) need a minimum 4% padding so the
-      // Y-axis never collapses to an unreadable ultra-tight band (e.g. $5.370K–$5.390K).
-      // This places the candle(s) at the vertical center with meaningful axis labels.
       const minPadFraction = scaleSource.length < 5 ? 0.04 : 0;
       const pad = Math.max(range * 0.15, safeMax * minPadFraction);
-      // Volume scale from visible real candles only; zero-volume entries ignored
       const realVols   = scaleBase.filter(c => c.volume > 0).map(c => c.volume);
       const sortedVols = [...realVols].sort((a, b) => a - b);
       const p90idx     = Math.min(Math.floor(sortedVols.length * 0.9), sortedVols.length - 1);
       const cappedVol  = sortedVols.length > 0 ? Math.max(sortedVols[p90idx] * 1.5, 1) : 1;
-      // Use a tight scale: start just below the lowest visible candle.
-      // Only force minP=0 when data goes near 0 (bottom < 10% of top),
-      // preventing the "scaled from $0 to huge value" axis artifact.
       const tightMin     = safeMin - pad;
       const includeZero  = tightMin < 0 || safeMin < safeMax * 0.08;
       const safeMinP     = includeZero ? Math.max(0, tightMin) : tightMin;
@@ -1135,7 +959,6 @@ export function TradingViewChart({
       };
     }
 
-    // Expand scale in-place only when live candle exceeds bounds
     const liveC = n > 0 ? displayCandles[n - 1] : null;
     if (liveC) {
       const { maxP: cMax, minP: cMin, maxVol } = priceScaleRef.current;
@@ -1149,15 +972,10 @@ export function TradingViewChart({
     }
   }
   const { maxP, minP, priceRange, maxVol } = priceScaleRef.current;
-  // slotW: pixel-width of one candle slot.
-  // For ALL mode we base it on the actual candle count so candles don't collide.
-  // For other modes we use the target density (visibleBuckets) to keep widths stable.
   const effectiveBuckets = visibleBuckets;
   const slotW = plotW / effectiveBuckets;
   const MAX_CANDLE_W = isMobile ? 16 : 12;
   const MAX_BAR_W    = isMobile ?  7 :  6;
-  // Body/tick widths derived from slotW so they never widen due to sparse data
-  // Very sparse tokens (1-4 candles): use wider bodies so isolated candles are readable.
   const _vSparse = n > 0 && n < 5;
   const isOneMinuteTf = timeframe === '1m';
   const isFiveMinuteTf = timeframe === '5m';
@@ -1175,9 +993,6 @@ export function TradingViewChart({
   function xOf(i: number): number {
     const c = displayCandles[i];
     if (!c) return PAD.left + (i + 0.5) * (plotW / Math.max(n, 1));
-    // Single source of truth for X positioning. Every visual layer uses the same
-    // timestamp → x mapping. Do not cap only the latest candle/dot here; capping
-    // created folded segments and de-synced volume bars from the line.
     return tsToX(c.timestamp + bucketMs / 2);
   }
   function yOf(price: number) {
@@ -1190,8 +1005,6 @@ export function TradingViewChart({
   function volBarH(vol: number): number {
     if (vol <= 0 || !isFinite(vol) || maxVol <= 0) return 0;
     const h = (vol / maxVol) * volumeAreaH;
-    // No hard minimum — micro-volume proportionally tiny (< 0.3px) renders as nothing.
-    // Only apply 1px floor once the bar is visually meaningful (≥0.3px proportional height).
     return h < 0.3 ? 0 : Math.max(1, h);
   }
 
@@ -1239,17 +1052,13 @@ export function TradingViewChart({
     }
   };
 
-  // ── Web mouse drag state ─────────────────────────────────────────────────
   const mouseDragRef         = useRef(false);
   const mouseDragStartXRef   = useRef(0);
   const mousePanStartRef     = useRef(0);
 
   const panResponder = useRef(
     PanResponder.create({
-      // Do NOT grab on start — let the move threshold decide.
-      // This ensures vertical swipes pass through to page scroll unobstructed.
       onStartShouldSetPanResponder: () => false,
-      // Grab only when the gesture is clearly horizontal.
       onMoveShouldSetPanResponder: (_e, gs) => {
         const adx = Math.abs(gs.dx);
         const ady = Math.abs(gs.dy);
@@ -1270,7 +1079,6 @@ export function TradingViewChart({
         if (gestureModeRef.current !== 'pan') return;
         userPannedRef.current = true;
         const pw = plotWRef.current || 1;
-        // Drag left (negative dx) = newer/live (offset decreases); drag right = older history (offset increases).
         const deltaMsFromStart = (gestureState.dx / pw) * visibleMsRef.current;
         const newOffsetMs = Math.max(0, panStartOffsetMsRef.current + deltaMsFromStart);
         animEngine.actions.setPanOffsetMs(newOffsetMs);
@@ -1283,7 +1091,6 @@ export function TradingViewChart({
           e.nativeEvent.pageY - touchStartYRef.current,
         );
         const elapsed = Date.now() - touchStartTimeRef.current;
-        // A short tap (< 300ms, < 10px movement) with no committed pan = show crosshair.
         if (gestureModeRef.current !== 'pan' || (totalMovement < 10 && elapsed < 300)) {
           applyTouchToCrosshair(e.nativeEvent.pageX, e.nativeEvent.pageY);
         }
@@ -1297,15 +1104,10 @@ export function TradingViewChart({
     })
   ).current;
 
-  // Web-only touch start ref for horizontal swipe detection
   const webTouchStartXRef = useRef(0);
   const webTouchStartYRef = useRef(0);
 
   const webMouseHandlers = Platform.OS === 'web' ? {
-    // Capture horizontal swipes inside the chart so the browser never sees them as
-    // navigation gestures (back/forward). We use pan-y touchAction on the container
-    // so vertical scroll still works, but for clearly horizontal drags we must call
-    // preventDefault so the browser back gesture is never triggered.
     onTouchStart: (e: any) => {
       const t = e.touches?.[0];
       if (t) { webTouchStartXRef.current = t.clientX; webTouchStartYRef.current = t.clientY; }
@@ -1315,7 +1117,6 @@ export function TradingViewChart({
       if (!t) return;
       const adx = Math.abs(t.clientX - webTouchStartXRef.current);
       const ady = Math.abs(t.clientY - webTouchStartYRef.current);
-      // If clearly horizontal (2:1 ratio) prevent browser back/forward navigation
       if (adx > 8 && adx > ady * 2) {
         e.preventDefault?.();
       }
@@ -1325,7 +1126,6 @@ export function TradingViewChart({
         userPannedRef.current = true;
         const pw = plotWRef.current || 1;
         const dx = e.clientX - mouseDragStartXRef.current;
-        // Drag left (negative dx) = newer/live (offset decreases); drag right = older history (offset increases).
         const deltaMsFromStart = (dx / pw) * visibleMsRef.current;
         const newOffsetMs = Math.max(0, mousePanStartRef.current + deltaMsFromStart);
         animEngine.actions.setPanOffsetMs(newOffsetMs);
@@ -1354,8 +1154,6 @@ export function TradingViewChart({
     onWheel: (e: any) => {
       e.preventDefault();
       const pw = plotWRef.current || 1;
-      // Horizontal scroll or shift+wheel scrolls the chart timeline.
-      // Vertical scroll (without shift) also scrolls the chart.
       const deltaX = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
       const scrollMs = (deltaX / pw) * visibleMsRef.current;
       const newOffset = Math.max(0, currentPanOffsetMsRef.current + scrollMs);
@@ -1372,8 +1170,6 @@ export function TradingViewChart({
   const contractAddr      = resolvedInfo?.address ?? tokenMint ?? '';
   const shortContractAddr = contractAddr ? `${contractAddr.slice(0, 6)}...${contractAddr.slice(-4)}` : '';
 
-  // Latest price: use interpolated price when in live mode (smoothly animated),
-  // then fall back to hook livePrice, last candle close, then external prop.
   const latestClose      = normalizedPriceRaw.length > 0
     ? normalizedPriceRaw[normalizedPriceRaw.length - 1].close
     : (quoteAnchorPrice > 0 ? quoteAnchorPrice : 0);
@@ -1382,12 +1178,7 @@ export function TradingViewChart({
     : latestClose > 0 ? latestClose
     : (currentPrice != null && currentPrice > 0 ? currentPrice : 0);
 
-  // Header always shows actual marketCap from snapshot (no stale scale multiplication).
-  // Axis labels use mcapScale for consistency.
   const mcapVal = resolvedInfo?.marketCap ?? null;
-  // 24h change: prefer live value from store (refreshed every 30s); fall back to snapshot.
-  // Validate: reject values outside ±999% as they indicate stale/bad data from the source.
-  // Show "—" when neither source has a real non-zero validated value.
   const raw24h  = resolvedInfo?.priceChange24h;
   const is24hValid = (v: number | null | undefined): v is number =>
     v !== null && v !== undefined && isFinite(v) && Math.abs(v) <= 999;
@@ -1396,12 +1187,7 @@ export function TradingViewChart({
   const has24h = is24hValid(live24hChange) || (is24hValid(raw24h) && raw24h !== 0);
   const isUp       = change24h >= 0;
   const changeColor = isUp ? '#10B981' : '#EC4899';
-  // Guide-anchored price: same source as the chart guide line.
-  // In MCAP mode the header uses this so header and guide never contradict each other.
-  // In price mode the header uses the live quote price (quote display is acceptable).
   const realAnchoredPrice = latestClose > 0 ? latestClose : displayPriceVal;
-  // MCAP mode: multiply real candle price by stable supply (same as guide + axis).
-  // Price mode: show live quote price directly.
   const liveScaledValue = valueMode === 'mcap'
     ? realAnchoredPrice * mcapScale
     : displayPriceVal;
@@ -1419,11 +1205,269 @@ export function TradingViewChart({
     setTimeout(() => setCopiedAddr(false), 2000);
   };
 
-  // Opens DAWEN's internal TradingView-style chart.
-  // It stays inside the app and uses the same existing token data sources.
   const handleOpenTradingView = () => {
     setShowProChart(true);
   };
+
+  // ── Sparse detection ──────────────────────────────────────────────────────
+  const _renderSortedGaps = displayCandles
+    .slice(1).map((c, i) => c.timestamp - displayCandles[i].timestamp)
+    .sort((a, b) => a - b);
+  const renderMedianGapMs = _renderSortedGaps.length > 0
+    ? _renderSortedGaps[Math.floor(_renderSortedGaps.length / 2)]
+    : bucketMs;
+  const _flatCount = displayCandles.filter(c =>
+    Math.abs(c.high - c.low) < Math.max(c.close, 1e-12) * 1e-6
+  ).length;
+  const _flatRatio = displayCandles.length > 0 ? _flatCount / displayCandles.length : 0;
+  const isSparseChart = displayCandles.length < 30 ||
+    renderMedianGapMs > bucketMs * 2 ||
+    _flatRatio > 0.5;
+  const isVerySparse = n < 5;
+
+  // ── Build paths ───────────────────────────────────────────────────────────
+  const bottomY    = (PAD.top + plotH).toFixed(1);
+  const plotRightX = PAD.left + plotW;
+  const safeRightX = plotRightX - (isMobile ? 34 : 28);
+  const isLineVisualMode = mode === 'area' || mode === 'line' || mode === 'mountain' || mode === 'bonding';
+
+  type LinePoint = { x: number; y: number; ts: number; price: number };
+  const rawLinePoints: LinePoint[] = displayCandles.map((c, i) => ({
+    x: xOf(i),
+    y: yOf(c.close),
+    ts: c.timestamp + bucketMs / 2,
+    price: c.close,
+  }));
+
+  const baseLinePoints: LinePoint[] = (() => {
+    if (!isLineVisualMode || rawLinePoints.length < 2) return rawLinePoints;
+    if (bucketMs > 5 * 60_000) return rawLinePoints;
+    const filled: LinePoint[] = [];
+    for (let i = 0; i < rawLinePoints.length; i++) {
+      filled.push(rawLinePoints[i]);
+      if (i < rawLinePoints.length - 1) {
+        const curr = rawLinePoints[i];
+        const next = rawLinePoints[i + 1];
+        const gapMs = next.ts - curr.ts;
+        if (gapMs > bucketMs * 1.5) {
+          const steps = Math.min(Math.floor(gapMs / bucketMs) - 1, 120);
+          for (let k = 1; k <= steps; k++) {
+            const fillTs = curr.ts + k * bucketMs;
+            if (fillTs >= next.ts) break;
+            const fillX = curr.x + (next.x - curr.x) * (k * bucketMs / gapMs);
+            filled.push({ x: fillX, y: curr.y, ts: fillTs, price: curr.price });
+          }
+        }
+      }
+    }
+    return filled;
+  })();
+
+  const fallbackGuideValue = valueMode === 'mcap'
+    ? (quoteAnchorPrice > 0 ? quoteAnchorPrice * mcapScale : minP)
+    : (quoteAnchorPrice > 0 ? quoteAnchorPrice : minP);
+  const lastBasePoint = baseLinePoints.length > 0
+    ? baseLinePoints[baseLinePoints.length - 1]
+    : { x: PAD.left, y: yOf(fallbackGuideValue), ts: xLeft, price: fallbackGuideValue };
+
+  const guideRightX = chartWidth - PAD.right;
+  const liveHoldTs = rightTime - bucketMs * 0.15;
+  const liveHoldX = guideRightX;
+  const shouldAppendLiveHold = animEngine.state.isLiveMode &&
+    baseLinePoints.length > 0 &&
+    liveHoldX > lastBasePoint.x + 1;
+
+  const liveHoldY = interpP && interpP > 0 && minP > 0 && maxP > minP
+    ? Math.max(PAD.top + 2, Math.min(PAD.top + plotH - 2, yOf(Math.max(minP, Math.min(maxP, interpP * mcapScale)))))
+    : lastBasePoint.y;
+
+  const linePoints: LinePoint[] = shouldAppendLiveHold
+    ? [...baseLinePoints, { x: liveHoldX, y: liveHoldY, ts: liveHoldTs, price: interpP && interpP > 0 ? interpP * mcapScale : lastBasePoint.price }]
+    : baseLinePoints;
+
+  const lastLinePoint = linePoints.length > 0
+    ? linePoints[linePoints.length - 1]
+    : lastBasePoint;
+
+  const lastX = lastLinePoint.x;
+  const lastY = lastLinePoint.y;
+
+  // *** PATCH 1: Enable live continuation for candle/bar modes ***
+  // Was: const showContinuation = false;
+  const showContinuation = animEngine.state.isLiveMode &&
+    !isLineVisualMode &&
+    displayCandles.length > 0;
+
+  const GAP_BREAK_FACTOR = 3;
+
+  function buildGapAwareStrokePath(pts: LinePoint[]): string {
+    if (pts.length === 0) return '';
+    const parts: string[] = [];
+    let segStartIdx = 0;
+    for (let j = 0; j < pts.length; j++) {
+      const x = pts[j].x.toFixed(1);
+      const y = pts[j].y.toFixed(1);
+      if (j === segStartIdx) {
+        parts.push(`M${x},${y}`);
+      } else {
+        const gapMs = pts[j].ts - pts[j - 1].ts;
+        if (gapMs > bucketMs * GAP_BREAK_FACTOR) {
+          if (j - 1 === segStartIdx) {
+            const px = pts[j - 1].x;
+            const py = pts[j - 1].y.toFixed(1);
+            const stub = (slotW * 0.15).toFixed(1);
+            parts.push(`M${(px - parseFloat(stub)).toFixed(1)},${py} L${(px + parseFloat(stub)).toFixed(1)},${py}`);
+          }
+          parts.push(`M${x},${y}`);
+          segStartIdx = j;
+        } else {
+          parts.push(`L${x},${y}`);
+        }
+      }
+    }
+    if (pts.length > 0 && pts.length - 1 === segStartIdx && pts.length > 1) {
+      const px = pts[segStartIdx].x;
+      const py = pts[segStartIdx].y.toFixed(1);
+      const stub = (slotW * 0.15).toFixed(1);
+      parts.push(`M${(px - parseFloat(stub)).toFixed(1)},${py} L${(px + parseFloat(stub)).toFixed(1)},${py}`);
+    }
+    return parts.join(' ');
+  }
+
+  function buildGapAwareAreaPath(pts: LinePoint[]): string {
+    if (pts.length === 0) return '';
+    const segments: LinePoint[][] = [];
+    let seg: LinePoint[] = [pts[0]];
+    for (let j = 1; j < pts.length; j++) {
+      const gapMs = pts[j].ts - pts[j - 1].ts;
+      if (gapMs > bucketMs * GAP_BREAK_FACTOR) {
+        segments.push(seg);
+        seg = [pts[j]];
+      } else {
+        seg.push(pts[j]);
+      }
+    }
+    segments.push(seg);
+    return segments.map(s => {
+      if (s.length === 1) {
+        const p = s[0];
+        const px = p.x.toFixed(1);
+        const py = p.y.toFixed(1);
+        const hw = (slotW * 0.3).toFixed(1);
+        return `M${(p.x - parseFloat(hw)).toFixed(1)},${py} L${(p.x + parseFloat(hw)).toFixed(1)},${py} L${(p.x + parseFloat(hw)).toFixed(1)},${bottomY} L${(p.x - parseFloat(hw)).toFixed(1)},${bottomY} Z`;
+      }
+      const first = s[0];
+      const last  = s[s.length - 1];
+      const line  = s.map((p, k) =>
+        `${k === 0 ? 'M' : 'L'}${p.x.toFixed(1)},${p.y.toFixed(1)}`
+      ).join(' ');
+      return `${line} L${last.x.toFixed(1)},${bottomY} L${first.x.toFixed(1)},${bottomY} Z`;
+    }).join(' ');
+  }
+
+  const continuousLinePath = buildGapAwareStrokePath(linePoints);
+  const lastPriceGuidePath = `M${PAD.left.toFixed(1)},${lastY.toFixed(1)} L${safeRightX.toFixed(1)},${lastY.toFixed(1)}`;
+
+  const baseLinePath = linePoints.length >= 2 ? continuousLinePath : lastPriceGuidePath;
+  const strokePath = baseLinePath;
+
+  const shouldFillLineMode = n >= 2;
+  const areaPath = shouldFillLineMode ? buildGapAwareAreaPath(linePoints) : '';
+
+  // *** PATCH 3: Show endpoint dot in ALL chart modes ***
+  // Was: const showOnlyLatestDot = !isVisualGuideOnly && (mode === 'area' || mode === 'line' || mode === 'mountain' || mode === 'bonding');
+  const showOnlyLatestDot = !isVisualGuideOnly && displayCandles.length > 0;
+
+  // *** PATCH 4: Position endpoint dot at live edge in live mode ***
+  // Was: const endpointX = lastX;
+  const endpointX = animEngine.state.isLiveMode ? guideRightX : lastX;
+
+  function buildGridLines(lo: number, hi: number, gridCount: number) {
+    const range = hi - lo;
+    if (range <= 0 || !isFinite(range)) return [];
+    const rawStep = range / (gridCount - 1);
+    const exp     = Math.floor(Math.log10(rawStep));
+    const m       = rawStep / Math.pow(10, exp);
+    const niceM   = m <= 1 ? 1 : m <= 2 ? 2 : m <= 5 ? 5 : 10;
+    const step    = niceM * Math.pow(10, exp);
+    const start   = Math.ceil(lo / step) * step;
+    const levels: { price: number; y: number; label: string }[] = [];
+    const seen    = new Set<string>();
+
+    const fmt = (v: number): string => {
+      if (valueMode !== 'mcap') return `$${fmtPrice(v)}`;
+      const relRange = range / Math.max(Math.abs(hi), 1);
+      if (v >= 1e9) return `$${(v / 1e9).toFixed(relRange < 0.02 ? 3 : relRange < 0.06 ? 2 : 1)}B`;
+      if (v >= 1e6) return `$${(v / 1e6).toFixed(relRange < 0.02 ? 3 : relRange < 0.06 ? 2 : 1)}M`;
+      if (v >= 1e3) return `$${(v / 1e3).toFixed(relRange < 0.02 ? 3 : relRange < 0.08 ? 2 : 1)}K`;
+      return `$${v.toFixed(relRange < 0.05 ? 4 : 2)}`;
+    };
+
+    for (let p = start; p <= hi + step * 0.01 && levels.length < gridCount + 2; p += step) {
+      if (p < lo - step * 0.01) continue;
+      const label = fmt(p);
+      if (seen.has(label)) continue;
+      seen.add(label);
+      levels.push({ price: p, y: yOf(p), label });
+    }
+    return levels;
+  }
+  const priceGridLines = buildGridLines(minP, maxP, 6);
+
+  function niceTimeStepMs(targetMs: number): number {
+    const steps = [
+      60_000, 2*60_000, 5*60_000, 10*60_000, 15*60_000, 30*60_000,
+      3_600_000, 2*3_600_000, 4*3_600_000, 6*3_600_000, 12*3_600_000,
+      86_400_000, 2*86_400_000, 7*86_400_000, 14*86_400_000,
+      30*86_400_000, 90*86_400_000,
+    ];
+    for (const s of steps) {
+      if (s >= targetMs * 0.75) return s;
+    }
+    return steps[steps.length - 1];
+  }
+  const timeLabelStepMs = niceTimeStepMs(xVisibleMs / 5);
+  const firstLabelTs    = Math.ceil(xLeft / timeLabelStepMs) * timeLabelStepMs;
+  const timeLabels: { ts: number; x: number; label: string }[] = [];
+  const timeLabelRight  = xLeft + xVisibleMs + timeLabelStepMs * 0.01;
+  const seenTimeLabels  = new Set<string>();
+  for (let ts = firstLabelTs; ts <= timeLabelRight; ts += timeLabelStepMs) {
+    const x = tsToX(ts);
+    if (x >= PAD.left + 10 && x <= chartWidth - PAD.right - 8) {
+      const label = fmtTimeByStep(ts, timeLabelStepMs);
+      if (!seenTimeLabels.has(label)) {
+        seenTimeLabels.add(label);
+        timeLabels.push({ ts, x, label });
+      }
+    }
+  }
+
+  // Guide line price
+  const scaledGuidePrice = (() => {
+    if (interpP && interpP > 0 && animEngine.state.isLiveMode) {
+      return interpP * mcapScale;
+    }
+    if (linePoints.length > 0) return linePoints[linePoints.length - 1].price;
+    if (displayCandles.length > 0) return displayCandles[displayCandles.length - 1].close;
+    return fallbackGuideValue > 0 ? fallbackGuideValue : 0;
+  })();
+  const scaledLivePrice  = liveScaledValue;
+  const clampedGuide = scaledGuidePrice > maxP ? maxP : scaledGuidePrice < minP ? minP : scaledGuidePrice;
+  const currentY     = Math.max(PAD.top + 2, Math.min(PAD.top + plotH - 2, yOf(clampedGuide)));
+
+  // *** PATCH 2: Continuation line targets — MOVED here after currentY ***
+  // Was: const contRightX = lastX; const contY = lastY; (placed earlier, before currentY existed)
+  const contRightX = guideRightX;
+  const contY = currentY;
+
+  const endpointY = currentY;
+
+  const historyOldestTs   = candles.length > 0 ? candles[0].timestamp : Date.now();
+  const historyLatestTs   = candles.length > 0 ? candles[candles.length - 1].timestamp : Date.now();
+  const historySpanMs     = Math.max(0, historyLatestTs - historyOldestTs);
+  const historyMaxPanBack = candles.length > 0
+    ? Math.max(0, Math.ceil(historySpanMs / bucketMs) - Math.floor(visibleBuckets * 0.92)) : 0;
+  const atHistoryStart = false;
 
   // ── Chart header ──────────────────────────────────────────────────────────
   const header = (
@@ -1624,312 +1668,6 @@ export function TradingViewChart({
     );
   }
 
-  // ── Sparse detection (render-level) ──────────────────────────────────────
-  // Computed before segment-building and continuation check so both can use it.
-  const _renderSortedGaps = displayCandles
-    .slice(1).map((c, i) => c.timestamp - displayCandles[i].timestamp)
-    .sort((a, b) => a - b);
-  const renderMedianGapMs = _renderSortedGaps.length > 0
-    ? _renderSortedGaps[Math.floor(_renderSortedGaps.length / 2)]
-    : bucketMs;
-  // Flat-doji ratio: repaired candles often have open=high=low=close.
-  // A high ratio means most data was repaired/flat — treat as sparse.
-  const _flatCount = displayCandles.filter(c =>
-    Math.abs(c.high - c.low) < Math.max(c.close, 1e-12) * 1e-6
-  ).length;
-  const _flatRatio = displayCandles.length > 0 ? _flatCount / displayCandles.length : 0;
-  // Sparse when: few candles, wide gaps, OR >50% flat dojis (repaired data).
-  const isSparseChart = displayCandles.length < 30 ||
-    renderMedianGapMs > bucketMs * 2 ||
-    _flatRatio > 0.5;
-  // Extremely sparse: 1-4 visible candles — enables extra-visible rendering paths.
-  const isVerySparse = n < 5;
-
-  // ── Build paths ───────────────────────────────────────────────────────────
-  const bottomY    = (PAD.top + plotH).toFixed(1);
-  const plotRightX = PAD.left + plotW;
-  const safeRightX = plotRightX - (isMobile ? 34 : 28);
-  const isLineVisualMode = mode === 'area' || mode === 'line' || mode === 'mountain' || mode === 'bonding';
-
-  type LinePoint = { x: number; y: number; ts: number; price: number };
-  const rawLinePoints: LinePoint[] = displayCandles.map((c, i) => ({
-    x: xOf(i),
-    y: yOf(c.close),
-    ts: c.timestamp + bucketMs / 2,
-    price: c.close,
-  }));
-
-  // Carry-forward for line/area modes on short timeframes (1m, 5m):
-  // When there are no trades in a bucket, instead of lifting the pen and creating a
-  // visual gap, keep the last known price flat until the next real trade.
-  // This is render-only — no candle data is mutated.
-  const baseLinePoints: LinePoint[] = (() => {
-    if (!isLineVisualMode || rawLinePoints.length < 2) return rawLinePoints;
-    // Only apply on timeframes where empty buckets are common
-    if (bucketMs > 5 * 60_000) return rawLinePoints; // only 1m and 5m
-    const filled: LinePoint[] = [];
-    for (let i = 0; i < rawLinePoints.length; i++) {
-      filled.push(rawLinePoints[i]);
-      if (i < rawLinePoints.length - 1) {
-        const curr = rawLinePoints[i];
-        const next = rawLinePoints[i + 1];
-        const gapMs = next.ts - curr.ts;
-        // If gap > 1.5× bucketMs, insert carry-forward points at each missing bucket
-        if (gapMs > bucketMs * 1.5) {
-          const steps = Math.min(Math.floor(gapMs / bucketMs) - 1, 120);
-          for (let k = 1; k <= steps; k++) {
-            const fillTs = curr.ts + k * bucketMs;
-            if (fillTs >= next.ts) break;
-            // x position derived from timestamp interpolation
-            const fillX = curr.x + (next.x - curr.x) * (k * bucketMs / gapMs);
-            filled.push({ x: fillX, y: curr.y, ts: fillTs, price: curr.price });
-          }
-        }
-      }
-    }
-    return filled;
-  })();
-
-  const fallbackGuideValue = valueMode === 'mcap'
-    ? (quoteAnchorPrice > 0 ? quoteAnchorPrice * mcapScale : minP)
-    : (quoteAnchorPrice > 0 ? quoteAnchorPrice : minP);
-  const lastBasePoint = baseLinePoints.length > 0
-    ? baseLinePoints[baseLinePoints.length - 1]
-    : { x: PAD.left, y: yOf(fallbackGuideValue), ts: xLeft, price: fallbackGuideValue };
-
-  // Live-hold point: extend the line horizontally to the right edge of the price plot.
-  // This connects the last real candle to the price guide/pill so the endpoint dot
-  // sits exactly where the guide line meets the Y-axis label area.
-  // Only append in live mode (no user pan) so the hold doesn't distort panned views.
-  //
-  // Use the animation engine's interpolatedPrice when available so the endpoint
-  // visually follows the smooth interpolation toward the latest real trade price,
-  // rather than snapping instantly to the raw hook price.
-  const guideRightX = chartWidth - PAD.right; // same x as the price guide line end
-  const liveHoldTs = rightTime - bucketMs * 0.15;
-  const liveHoldX = guideRightX;
-  const shouldAppendLiveHold = animEngine.state.isLiveMode &&
-    baseLinePoints.length > 0 &&
-    liveHoldX > lastBasePoint.x + 1;
-
-  // When we have an interpolated price, use it for the live hold point so the
-  // endpoint dot and guide line move smoothly to the new real trade price.
-  const liveHoldY = interpP && interpP > 0 && minP > 0 && maxP > minP
-    ? Math.max(PAD.top + 2, Math.min(PAD.top + plotH - 2, yOf(Math.max(minP, Math.min(maxP, interpP * mcapScale)))))
-    : lastBasePoint.y;
-
-  const linePoints: LinePoint[] = shouldAppendLiveHold
-    ? [...baseLinePoints, { x: liveHoldX, y: liveHoldY, ts: liveHoldTs, price: interpP && interpP > 0 ? interpP * mcapScale : lastBasePoint.price }]
-    : baseLinePoints;
-
-  const lastLinePoint = linePoints.length > 0
-    ? linePoints[linePoints.length - 1]
-    : lastBasePoint;
-
-  // Reuse the exact same endpoint for the path, dot, and guide.
-  const lastX = lastLinePoint.x;
-  const lastY = lastLinePoint.y;
-
-  const contRightX = lastX;
-  const contY = lastY;
-  const showContinuation = false;
-
-  // Gap threshold: a gap larger than 3× bucketMs means the two candles are not adjacent
-  // in real trading time and should NOT be connected by a diagonal line. Use M (moveto)
-  // to lift the pen and start a new sub-path so no phantom line crosses the gap.
-  const GAP_BREAK_FACTOR = 3;
-
-  function buildGapAwareStrokePath(pts: LinePoint[]): string {
-    if (pts.length === 0) return '';
-    const parts: string[] = [];
-    // Track segment starts to detect isolated single-point segments.
-    // For isolated points, draw a tiny horizontal stub so strokeLinecap="round"
-    // renders a visible dot instead of an invisible zero-length path segment.
-    let segStartIdx = 0;
-    for (let j = 0; j < pts.length; j++) {
-      const x = pts[j].x.toFixed(1);
-      const y = pts[j].y.toFixed(1);
-      if (j === segStartIdx) {
-        parts.push(`M${x},${y}`);
-      } else {
-        const gapMs = pts[j].ts - pts[j - 1].ts;
-        if (gapMs > bucketMs * GAP_BREAK_FACTOR) {
-          // Check if the previous segment was a single isolated point — draw a stub
-          if (j - 1 === segStartIdx) {
-            const px = pts[j - 1].x;
-            const py = pts[j - 1].y.toFixed(1);
-            const stub = (slotW * 0.15).toFixed(1);
-            parts.push(`M${(px - parseFloat(stub)).toFixed(1)},${py} L${(px + parseFloat(stub)).toFixed(1)},${py}`);
-          }
-          // Lift pen: jump to new position without drawing a line across the gap.
-          parts.push(`M${x},${y}`);
-          segStartIdx = j;
-        } else {
-          parts.push(`L${x},${y}`);
-        }
-      }
-    }
-    // Handle trailing isolated point
-    if (pts.length > 0 && pts.length - 1 === segStartIdx && pts.length > 1) {
-      const px = pts[segStartIdx].x;
-      const py = pts[segStartIdx].y.toFixed(1);
-      const stub = (slotW * 0.15).toFixed(1);
-      parts.push(`M${(px - parseFloat(stub)).toFixed(1)},${py} L${(px + parseFloat(stub)).toFixed(1)},${py}`);
-    }
-    return parts.join(' ');
-  }
-
-  // Gap-aware area fill: each contiguous segment is closed to the bottom individually
-  // so no phantom fill spans across an empty gap.
-  // Single-point segments are rendered as a thin vertical sliver so isolated candles
-  // don't cause the area fill to vanish and leave disconnected vertical blocks.
-  function buildGapAwareAreaPath(pts: LinePoint[]): string {
-    if (pts.length === 0) return '';
-    const segments: LinePoint[][] = [];
-    let seg: LinePoint[] = [pts[0]];
-    for (let j = 1; j < pts.length; j++) {
-      const gapMs = pts[j].ts - pts[j - 1].ts;
-      if (gapMs > bucketMs * GAP_BREAK_FACTOR) {
-        segments.push(seg);
-        seg = [pts[j]];
-      } else {
-        seg.push(pts[j]);
-      }
-    }
-    segments.push(seg);
-    return segments.map(s => {
-      if (s.length === 1) {
-        // Single isolated point: render as a hairline vertical fill so area doesn't disappear
-        const p = s[0];
-        const px = p.x.toFixed(1);
-        const py = p.y.toFixed(1);
-        const hw = (slotW * 0.3).toFixed(1);
-        return `M${(p.x - parseFloat(hw)).toFixed(1)},${py} L${(p.x + parseFloat(hw)).toFixed(1)},${py} L${(p.x + parseFloat(hw)).toFixed(1)},${bottomY} L${(p.x - parseFloat(hw)).toFixed(1)},${bottomY} Z`;
-      }
-      const first = s[0];
-      const last  = s[s.length - 1];
-      const line  = s.map((p, k) =>
-        `${k === 0 ? 'M' : 'L'}${p.x.toFixed(1)},${p.y.toFixed(1)}`
-      ).join(' ');
-      return `${line} L${last.x.toFixed(1)},${bottomY} L${first.x.toFixed(1)},${bottomY} Z`;
-    }).join(' ');
-  }
-
-  const continuousLinePath = buildGapAwareStrokePath(linePoints);
-  const lastPriceGuidePath = `M${PAD.left.toFixed(1)},${lastY.toFixed(1)} L${safeRightX.toFixed(1)},${lastY.toFixed(1)}`;
-
-  const baseLinePath = linePoints.length >= 2 ? continuousLinePath : lastPriceGuidePath;
-  const strokePath = baseLinePath;
-
-  const shouldFillLineMode = n >= 2;
-  const areaPath = shouldFillLineMode ? buildGapAwareAreaPath(linePoints) : '';
-
-  // Dots are restricted to the final live/current point only.
-  // No constellation of isolated dots: they made sparse charts look broken.
-  const showOnlyLatestDot = !isVisualGuideOnly && (mode === 'area' || mode === 'line' || mode === 'mountain' || mode === 'bonding');
-  // endpointX/Y are finalised after currentY is computed below so they share the same y-clamping.
-  // Use a placeholder here; the real values are assigned after currentY is available.
-  const endpointX = lastX;
-
-  // ── Smart grid: use "nice" steps to avoid duplicate rounded labels ─────────
-  // Computes up to `gridCount` evenly-spaced price levels using a "round number" step
-  // (nearest 1/2/5 × 10^n), then formats with enough decimal places so no two labels
-  // show the same rounded string.
-  function buildGridLines(lo: number, hi: number, gridCount: number) {
-    const range = hi - lo;
-    if (range <= 0 || !isFinite(range)) return [];
-    const rawStep = range / (gridCount - 1);
-    const exp     = Math.floor(Math.log10(rawStep));
-    const m       = rawStep / Math.pow(10, exp);
-    const niceM   = m <= 1 ? 1 : m <= 2 ? 2 : m <= 5 ? 5 : 10;
-    const step    = niceM * Math.pow(10, exp);
-    const start   = Math.ceil(lo / step) * step;
-    const levels: { price: number; y: number; label: string }[] = [];
-    const seen    = new Set<string>();
-
-    const fmt = (v: number): string => {
-      if (valueMode !== 'mcap') return `$${fmtPrice(v)}`;
-      // Relative range: small ratio → need more decimal places to distinguish labels
-      const relRange = range / Math.max(Math.abs(hi), 1);
-      if (v >= 1e9) return `$${(v / 1e9).toFixed(relRange < 0.02 ? 3 : relRange < 0.06 ? 2 : 1)}B`;
-      if (v >= 1e6) return `$${(v / 1e6).toFixed(relRange < 0.02 ? 3 : relRange < 0.06 ? 2 : 1)}M`;
-      if (v >= 1e3) return `$${(v / 1e3).toFixed(relRange < 0.02 ? 3 : relRange < 0.08 ? 2 : 1)}K`;
-      return `$${v.toFixed(relRange < 0.05 ? 4 : 2)}`;
-    };
-
-    for (let p = start; p <= hi + step * 0.01 && levels.length < gridCount + 2; p += step) {
-      if (p < lo - step * 0.01) continue;
-      const label = fmt(p);
-      if (seen.has(label)) continue;
-      seen.add(label);
-      levels.push({ price: p, y: yOf(p), label });
-    }
-    return levels;
-  }
-  const priceGridLines = buildGridLines(minP, maxP, 6);
-
-  // Time labels — always spaced by a "nice" human-readable interval derived from
-  // the actual visible time window (xVisibleMs), not from bucketMs × visibleBuckets.
-  // This ensures the axis looks clean even when the adaptive x-range has expanded
-  // or contracted the window for sparse tokens.
-  function niceTimeStepMs(targetMs: number): number {
-    const steps = [
-      60_000, 2*60_000, 5*60_000, 10*60_000, 15*60_000, 30*60_000,
-      3_600_000, 2*3_600_000, 4*3_600_000, 6*3_600_000, 12*3_600_000,
-      86_400_000, 2*86_400_000, 7*86_400_000, 14*86_400_000,
-      30*86_400_000, 90*86_400_000,
-    ];
-    for (const s of steps) {
-      if (s >= targetMs * 0.75) return s;
-    }
-    return steps[steps.length - 1];
-  }
-  const timeLabelStepMs = niceTimeStepMs(xVisibleMs / 5);
-  const firstLabelTs    = Math.ceil(xLeft / timeLabelStepMs) * timeLabelStepMs;
-  const timeLabels: { ts: number; x: number; label: string }[] = [];
-  const timeLabelRight  = xLeft + xVisibleMs + timeLabelStepMs * 0.01;
-  const seenTimeLabels  = new Set<string>();
-  for (let ts = firstLabelTs; ts <= timeLabelRight; ts += timeLabelStepMs) {
-    const x = tsToX(ts);
-    if (x >= PAD.left + 10 && x <= chartWidth - PAD.right - 8) {
-      const label = fmtTimeByStep(ts, timeLabelStepMs);
-      if (!seenTimeLabels.has(label)) {
-        seenTimeLabels.add(label);
-        timeLabels.push({ ts, x, label });
-      }
-    }
-  }
-
-  // Guide line: anchored to the last rendered chart point/candle, not a separate quote source.
-  // This keeps the price pill, dotted guide, endpoint dot, and visible path synchronized.
-  // When the animation engine has an interpolated price, the guide tracks it so the
-  // dashed line and price pill move together with the endpoint dot.
-  const scaledGuidePrice = (() => {
-    if (interpP && interpP > 0 && animEngine.state.isLiveMode) {
-      return interpP * mcapScale;
-    }
-    if (linePoints.length > 0) return linePoints[linePoints.length - 1].price;
-    if (displayCandles.length > 0) return displayCandles[displayCandles.length - 1].close;
-    return fallbackGuideValue > 0 ? fallbackGuideValue : 0;
-  })();
-  const scaledLivePrice  = liveScaledValue; // header/display only — can include quote prices
-  const clampedGuide = scaledGuidePrice > maxP ? maxP : scaledGuidePrice < minP ? minP : scaledGuidePrice;
-  const currentY     = Math.max(PAD.top + 2, Math.min(PAD.top + plotH - 2, yOf(clampedGuide)));
-
-  // Endpoint dot: shares the exact same Y as the price guide so dot and guide are always on
-  // the same horizontal. When live mode extends the line to guideRightX, the dot coincides
-  // with the left edge of the price pill — no visual gap between line end and pill.
-  const endpointY = currentY;
-
-  // History start indicator
-  const historyOldestTs   = candles.length > 0 ? candles[0].timestamp : Date.now();
-  const historyLatestTs   = candles.length > 0 ? candles[candles.length - 1].timestamp : Date.now();
-  const historySpanMs     = Math.max(0, historyLatestTs - historyOldestTs);
-  const historyMaxPanBack = candles.length > 0
-    ? Math.max(0, Math.ceil(historySpanMs / bucketMs) - Math.floor(visibleBuckets * 0.92)) : 0;
-  // Hide the start marker for now; it was visually confusing on sparse charts and is not data.
-  const atHistoryStart = false;
-
   return (
     <View style={styles.container}>
       {header}
@@ -1977,12 +1715,9 @@ export function TradingViewChart({
               userSelect: 'none',
               WebkitUserSelect: 'none',
               MozUserSelect: 'none',
-              // pan-y: vertical page scroll still works; PanResponder captures horizontal
-            // overscrollBehaviorX: contain keeps horizontal swipe inside the chart and
-            // prevents the browser from interpreting it as a back/forward navigation gesture.
-            touchAction: 'pan-y',
-            overscrollBehaviorX: 'contain',
-            WebkitOverflowScrolling: 'touch',
+              touchAction: 'pan-y',
+              overscrollBehaviorX: 'contain',
+              WebkitOverflowScrolling: 'touch',
             } as any),
           ]}
           {...panResponder.panHandlers}
@@ -2090,8 +1825,6 @@ export function TradingViewChart({
                 </>
               )}
 
-              {/* Sparse single-point markers removed: line-style modes now show one clean path and one latest endpoint only. */}
-
               {mode === 'bar' && !isVisualGuideOnly && displayCandles.map((c, i) => {
                 const up  = c.close >= c.open;
                 const col = up ? '#10B981' : '#EC4899';
@@ -2102,11 +1835,8 @@ export function TradingViewChart({
                 const yC  = yOf(c.close);
                 return (
                   <G key={`bar${c.timestamp}`}>
-                    {/* Thin vertical high-low spine */}
                     <Line x1={cx} y1={yH} x2={cx} y2={yL} stroke={col} strokeWidth={1} />
-                    {/* Open tick — left side, pointing left */}
                     <Line x1={cx - barW} y1={yO} x2={cx} y2={yO} stroke={col} strokeWidth={1} />
-                    {/* Close tick — right side, pointing right */}
                     <Line x1={cx} y1={yC} x2={cx + barW} y2={yC} stroke={col} strokeWidth={1} />
                   </G>
                 );
@@ -2123,21 +1853,13 @@ export function TradingViewChart({
                 const bodyTop = yOf(Math.max(c.open, c.close));
                 const bodyBot = yOf(Math.min(c.open, c.close));
                 const rawH    = bodyBot - bodyTop;
-                // Keep 1m/flat candles readable. A 1px doji line looked like a
-                // random tick/bar instead of a candle on mobile. This only changes
-                // visual body height; OHLC data remains untouched.
                 const minBodyH = isOneMinuteTf ? 3 : isFiveMinuteTf ? 2.5 : 2;
                 const bodyH = Math.max(minBodyH, rawH);
-                // Center expanded body around the actual price midpoint (between bodyTop and bodyBot).
-                // Do NOT shift by minBodyH/2 from bodyTop alone — that floats the body above the wick
-                // for flat doji candles where bodyTop === bodyBot.
                 const bodyMidY = (bodyTop + bodyBot) / 2;
                 const bodyY = bodyH > rawH ? bodyMidY - bodyH / 2 : bodyTop;
                 return (
                   <G key={`cs${c.timestamp}`}>
-                    {/* Thin wick — always centered on the same x as the candle body */}
                     <Line x1={cx} y1={yHigh} x2={cx} y2={yLow} stroke={col} strokeWidth={wickW} />
-                    {/* Normal body: up = hollow outline, down = filled (TradingView convention) */}
                     {up ? (
                       <Rect x={cx - candleW / 2} y={bodyY} width={candleW} height={bodyH}
                         fill="none" stroke={fillCol} strokeWidth={1} />
@@ -2151,19 +1873,18 @@ export function TradingViewChart({
 
             </G>{/* end chartClip */}
 
-            {/* No continuation line: viewport movement handles live time. */}
-            {showContinuation && (mode === 'candlestick' || mode === 'bar') && (
+            {/* *** PATCH 5: Live continuation line from last candle to right edge *** */}
+            {showContinuation && (
               <Line
                 x1={lastX} y1={contY}
                 x2={contRightX} y2={contY}
-                stroke="rgba(167,139,250,0.35)"
-                strokeWidth={1}
-                strokeDasharray="3,4"
+                stroke="rgba(167,139,250,0.5)"
+                strokeWidth={1.5}
+                strokeDasharray="4,3"
               />
             )}
 
-            {/* Price guide line + pill — anchored to last real candle close (never quote-only).
-                Only rendered when we have a real chart price to anchor to. */}
+            {/* Price guide line + pill */}
             {showPriceLine && scaledGuidePrice > 0 && (
               <>
                 <Line
@@ -2181,13 +1902,7 @@ export function TradingViewChart({
               </>
             )}
 
-            {/* Endpoint marker — static dot is attached to the last real rendered candle.
-                Pulse ring appears only for confirmed real trades.
-                Pulse conditions (ALL must be true):
-                  1. activeLiveCandle.sourceType === 'realTrade'  — came from is_live=true DB row
-                  2. tradeTimestamp < LIVE_CANDLE_STALE_MS ago    — trade was recent
-                Quote-only updates (DexScreener WS, Jupiter REST, liveTokenStore) never set
-                activeLiveCandle so the ring is naturally absent for those sources. */}
+            {/* Endpoint dot — now shows in ALL chart modes (PATCH 3) */}
             {showOnlyLatestDot && (
               <G>
                 {activeLiveCandle?.sourceType === 'realTrade' &&
@@ -2211,7 +1926,22 @@ export function TradingViewChart({
               </G>
             )}
 
-            {/* Volume bars in their own clipped lane — never allowed to enter the price plot. */}
+            {/* *** PATCH 6: Live price tick on right axis for candle/bar modes *** */}
+            {!isLineVisualMode && animEngine.state.isLiveMode && displayCandles.length > 0 && (
+              <G>
+                <Line
+                  x1={chartWidth - PAD.right - 8}
+                  y1={currentY}
+                  x2={chartWidth - PAD.right}
+                  y2={currentY}
+                  stroke="#A78BFA"
+                  strokeWidth={2.5}
+                  strokeLinecap="round"
+                />
+              </G>
+            )}
+
+            {/* Volume bars */}
             <G clipPath="url(#volumeClip)">
               {showVolume && displayCandles.map((c, i) => {
                 const h    = volBarH(c.volume);
